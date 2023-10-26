@@ -1,0 +1,89 @@
+#!jinja2
+{% set REWIND_BLOCK = '012' %}
+{% set REWIND_MEMBER = '002' %}
+{% set REWIND_TRIGGER = 'a' %}
+[task parameters]
+    block = 0, 12, 24, 36, 48, 60
+    member = 1..3
+    [[templates]]
+        block = _%(block)03d
+        member = _%(member)03d
+
+[scheduling]
+    initial cycle point = 20200101T0000Z
+    final cycle point = 20200101T0000Z
+    [[graph]]
+        P1D = """
+            wait<block-1, member> => wait<block, member>
+            wait<block, member> => a<block, member>
+                => b<block, member>
+                => c<block, member> & d<block, member>
+            c<block, member> => e<block, member>
+            d<block, member> & e<block, member>
+                => archive<block, member>
+                => finalise<member>
+                => cleanup
+
+            # Force trigger of rewind for member 2
+            {{REWIND_TRIGGER}}_{{REWIND_BLOCK}}_{{REWIND_MEMBER}} => kill_and_hold_{{REWIND_MEMBER}}
+                => clean_remote_work_dirs_{{REWIND_MEMBER}}
+                => rewind_{{REWIND_MEMBER}}
+        """
+
+[runtime]
+    [[root]]
+        script = sleep $((RANDOM%3+2))
+        pre-script = set -x
+
+    [[kill_and_hold<member>]]
+        script = """
+if [[ $CYLC_TASK_FLOW_NUMBERS != 1 ]]; then
+# Just make this abort if not the first flow to stop an infinite loop forming
+return 1
+fi
+cylc hold "$CYLC_WORKFLOW_NAME" "//20200101T0000Z/RUN_TASKS_{{REWIND_MEMBER}}"
+# Hardcoded list of blocks to kill
+for t in HHH_024 HHH_036 HHH_048 HHH_060 finalise; do
+    tasks+=("//20200101T0000Z/${t}_{{REWIND_MEMBER}}")
+done
+# Kill/hold a couple of times in case there is some race/edge condition
+cylc kill "$CYLC_WORKFLOW_NAME" "${tasks[@]}"
+sleep 1
+cylc hold "$CYLC_WORKFLOW_NAME" "//20200101T0000Z/RUN_TASKS_{{REWIND_MEMBER}}"
+sleep 1
+cylc kill "$CYLC_WORKFLOW_NAME" "${tasks[@]}"
+sleep 1
+cylc hold "$CYLC_WORKFLOW_NAME" "//20200101T0000Z/RUN_TASKS_{{REWIND_MEMBER}}"
+
+# Remove all flow one tasks for the tasks we have tried to kill
+cylc remove "$CYLC_WORKFLOW_NAME" "${tasks[@]}"
+
+"""
+
+    [[clean_remote_work_dirs<member>]]
+        # remove old CYLC_TASK_WORK_DIR to ensure rose-bunch reruns tasks
+
+    [[rewind<member>]]
+        script = """
+cylc trigger --flow=new "$CYLC_WORKFLOW_NAME" "//20200101T0000Z/wait_{{REWIND_BLOCK}}_{{REWIND_MEMBER}}"
+cylc release "$CYLC_WORKFLOW_NAME" "//20200101T0000Z/RUN_TASKS_{{REWIND_MEMBER}}"
+"""
+
+
+    [[RUN_TASKS<member>]]
+
+    [[HHH<block, member>]]
+        inherit = RUN_TASKS<member>
+
+{% for task in ('wait', 'a', 'b', 'c', 'd', 'e', 'archive') %}
+    {% for member in ('001', '002', '003') %}
+    [[{{ task }}<block>_{{member}}]]
+        inherit = HHH<block>_{{member}}
+    {% endfor %}
+{% endfor %}
+
+
+    [[finalise<member>]]
+        inherit = RUN_TASKS<member>
+
+    [[cleanup]]

@@ -1,0 +1,87 @@
+#!jinja2
+
+[task parameters]
+    block = 0, 12, 24, 36, 48, 60
+    member = 1..3
+    [[templates]]
+        block = _%(block)03d
+        member = _%(member)03d
+
+[scheduler]
+    cycle point format = CCYYMMDD
+[scheduling]
+    initial cycle point = 20200101T0000Z
+    final cycle point = 20200101T0000Z
+    [[queues]]
+        [[[default]]]
+           limit = 10
+    [[graph]]
+        P1D = """
+            wait<block-1, member> => wait<block, member>
+            wait<block, member> => a<block, member>
+                => b<block, member>
+                => c<block, member> & d<block, member>
+            c<block, member> => e<block, member>
+            d<block, member> & e<block, member>
+                => archive<block, member>
+                => finalise<member>
+                => cleanup
+
+            # Force trigger of rewind for member 2
+            #a_012_002 => kill_and_hold_002?
+            #    => clean_remote_work_dirs_002
+            #    => rewind_002
+        """
+[runtime]
+    [[root]]
+        pre-script = sleep $((3 + RANDOM % 10))
+        [[[environment]]]
+            ID_PT=${CYLC_WORKFLOW_ID}//${CYLC_TASK_CYCLE_POINT}
+            # To match run_002 tasks but not in block 000:
+            REWIND_GLOB="${ID_PT}/HHH_0[1-9]?_002"
+
+    [[kill_and_hold<member>]]
+        script = """
+            if ((CYLC_TASK_SUBMIT_NUMBER != 1)); then
+                exit 1
+            fi
+            sleep 17  # wait for more tasks to start running, to make it harder.
+
+            # hold to prevent any queued tasks from submitting
+            cylc hold "$REWIND_GLOB"
+
+            # kill (and hold) active tasks
+            cylc kill "$REWIND_GLOB"
+            sleep 6  # wait for async job kill
+
+            # remove failed (killed) and waiting tasks
+            #  GH#5752: also releases hold, ready for next flow)
+            cylc remove "$REWIND_GLOB"
+
+            # NOTE on current master also need "cylc release --all" because:
+            # - remove does not release
+            # - can't release future tasks (after the remove) by glob
+        """
+    [[clean_remote_work_dirs<member>]]
+        # remove old CYLC_TASK_WORK_DIR to ensure rose-bunch reruns tasks
+        script = sleep 10
+
+    [[rewind<member>]]
+        script = "cylc trigger --flow=new ${ID_PT}/wait_012_002"
+
+    [[RUN_TASKS<member>]]
+
+    [[HHH<block, member>]]
+        inherit = RUN_TASKS<member>
+
+{% for task in ('wait', 'a', 'b', 'c', 'd', 'e', 'archive') %}
+    {% for member in ('001', '002', '003') %}
+    [[{{ task }}<block>_{{member}}]]
+        inherit = HHH<block>_{{member}}
+    {% endfor %}
+{% endfor %}
+
+    [[finalise<member>]]
+        inherit = RUN_TASKS<member>
+
+    [[cleanup]]
